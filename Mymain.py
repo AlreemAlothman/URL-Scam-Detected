@@ -26,11 +26,13 @@ try:
 except Exception as e:
     raise RuntimeError(f"Failed to load model/vectorizer: {e}")
 
+# ========= NLP و استخراج الدومين =========
 from nltk.tokenize import RegexpTokenizer
 from nltk.stem.snowball import SnowballStemmer
-from urllib.parse import urlparse   
+from urllib.parse import urlparse
 
-tokenizer = RegexpTokenizer(r"[A-Za-z0-9]+")
+# رجّعنا نفس التوكنيزر القديم (حروف فقط) عشان يطابق التدريب
+tokenizer = RegexpTokenizer(r"[A-Za-z]+")
 stemmer   = SnowballStemmer("english")
 
 def preprocess_url(url: str) -> str:
@@ -38,10 +40,11 @@ def preprocess_url(url: str) -> str:
     stemmed = [stemmer.stem(t) for t in tokens]
     return " ".join(stemmed)
 
-# ========= دومينات موثوقة (تقدرين تزودينها لاحقًا) =========
+# دومينات موثوقة فقط (لا تضيفي wixsite هنا)
 TRUSTED_DOMAINS = {
     "google.com",
     "whatsapp.com",
+    "youtube.com",
     "facebook.com",
     "instagram.com",
     "apple.com",
@@ -51,9 +54,6 @@ TRUSTED_DOMAINS = {
 }
 
 def get_domain(url: str) -> str:
-    """
-    ترجّع الدومين الرئيسي مثل whatsapp.com أو google.com
-    """
     if "://" not in url:
         url = "http://" + url
     parsed = urlparse(url)
@@ -92,57 +92,63 @@ def _predict(url: str):
         url = url.strip()
         domain = get_domain(url)
 
+        # 1️⃣ لو الدومين موثوق جدًا → نعتبره safe
         if domain in TRUSTED_DOMAINS:
             return {
                 "url": url,
-                "label": "safe",         
-                "safe_label": "safe",    
-                "score": 0.01,           
-                "raw_model_label": 0,    
+                "label": "safe",
+                "safe_label": "safe",
+                "score": 0.01,
+                "raw_model_label": 0,
                 "risk_level": "low",
                 "reason": "trusted_domain",
             }
 
+        # 2️⃣ تجهيز النص للمودل (نفس ما درّبنا)
         processed = preprocess_url(url)
         X = vectorizer.transform([processed])
 
-        raw_y = int(model.predict(X)[0])
+        # قرار المودل الأصلي (ما نغيّره)
+        raw_y = int(model.predict(X)[0])   # 1 = phishing, 0 = safe
 
+        # احتمال الفيشينج (معلومة إضافية)
         prob = None
         if hasattr(model, "predict_proba"):
             try:
-                prob = float(model.predict_proba(X)[0, 1]) 
+                prob = float(model.predict_proba(X)[0, 1])
             except Exception:
                 prob = None
 
-        if prob is not None:
-            HIGH = 0.90   
-            MID  = 0.60   
+        # 3️⃣ منطق التصنيف النهائي
+        if raw_y == 1:
+            # المودل متأكد أنه phishing → ما نحوله Safe أبداً
+            label = "notsafe"
+            safe_label = "not safe"
 
-            if prob >= HIGH:
-                label = "notsafe"
-                safe_label = "not safe"
-                risk_level = "high"
-            elif prob >= MID:
-                label = "suspicious"
-                safe_label = "suspicious"
-                risk_level = "medium"
+            # مستوى الخطورة من الاحتمال
+            if prob is not None:
+                if prob >= 0.9:
+                    risk_level = "high"
+                elif prob >= 0.7:
+                    risk_level = "medium"
+                else:
+                    risk_level = "low"   # borderline بس ما زال notsafe
             else:
-                label = "safe"
-                safe_label = "safe"
-                risk_level = "low"
+                risk_level = None
+
         else:
-            label = "notsafe" if raw_y == 1 else "safe"
-            safe_label = "not safe" if raw_y == 1 else "safe"
-            risk_level = None
+            # المودل قال safe
+            label = "safe"
+            safe_label = "safe"
+            risk_level = "low"
 
         return {
             "url": url,
-            "label": label,             # safe / suspicious / notsafe
-            "safe_label": safe_label,   
-            "score": prob,              
-            "raw_model_label": raw_y,  
-            "risk_level": risk_level,   
+            "label": label,             # safe / notsafe
+            "safe_label": safe_label,   # نص للواجهة
+            "score": prob,              # احتمال الفيشينج
+            "raw_model_label": raw_y,   # 0 أو 1 من المودل
+            "risk_level": risk_level,   # high / medium / low
             "reason": "model_score",
         }
 
