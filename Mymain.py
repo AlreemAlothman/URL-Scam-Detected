@@ -1,86 +1,130 @@
-from fastapi import FastAPI, HTTPException, Query
-from fastapi.middleware.cors import CORSMiddleware
+from fastapi import FastAPI
 from pydantic import BaseModel
-from pathlib import Path
 import joblib
-
-# ========= إعدادات التطبيق =========
-app = FastAPI(title="URL Scam Detector", version="1.0.0")
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],  
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-# ========= تحميل الموديلات =========
-BASE = Path(__file__).resolve().parent
-MODEL_PATH = BASE / "phishing_model.pkl"
-VECT_PATH  = BASE / "vectorizer.pkl"
-
-try:
-    model = joblib.load(MODEL_PATH)
-    vectorizer = joblib.load(VECT_PATH)
-except Exception as e:
-    # لو صار خطأ بالتحميل خلّيه واضح في اللوق
-    raise RuntimeError(f"Failed to load model/vectorizer: {e}")
-
-# ========= تجهيز الـ NLP (بدون تنزيل كوربسات) =========
 from nltk.tokenize import RegexpTokenizer
 from nltk.stem.snowball import SnowballStemmer
+from urllib.parse import urlparse
+import re
 
-tokenizer = RegexpTokenizer(r"[A-Za-z]+")
-stemmer   = SnowballStemmer("english")
+# Load saved model and vectorizer
+model = joblib.load('phishing_model.pkl')
+cv = joblib.load('vectorizer.pkl')
 
-def preprocess_url(url: str) -> str:
-    tokens = tokenizer.tokenize(url or "")
-    stemmed = [stemmer.stem(t) for t in tokens]
-    return " ".join(stemmed)
+# Setup tokenizer and stemmer
+tokenizer = RegexpTokenizer(r'[A-Za-z]+')
+stemmer = SnowballStemmer("english")
 
-# ========= نماذج الإدخال =========
+app = FastAPI()
+
+# Input model for request
 class URLInput(BaseModel):
     url: str
 
-# ========= مسارات مساعدة =========
-@app.get("/")
-def root():
-    return {"message": "URL Scam Detector is running", "docs": "/docs"}
-
-@app.get("/health")
-def health():
-    return {"status": "ok"}
-
-# ========= التنبؤ (GET) =========
-@app.get("/predict")
-def predict_get(url: str = Query(..., description="URL to classify")):
-    return _predict(url)
-
-# ========= التنبؤ (POST) =========
-@app.post("/predict")
-def predict_post(data: URLInput):
-    return _predict(data.url)
-
-# ========= الدالة المشتركة =========
-def _predict(url: str):
+def extract_domain_features(url):
+    """استخراج ميزات إضافية من الرابط لتحسين الدقة"""
     try:
-        processed = preprocess_url(url)
-        X = vectorizer.transform([processed])
-        y = model.predict(X)[0]
-
-        prob = None
-        if hasattr(model, "predict_proba"):
-            try:
-                prob = float(model.predict_proba(X)[0, 1])
-            except Exception:
-                prob = None
-
-        return {
-            "url": url,
-            "label": int(y),                       # 1=phishing, 0=safe
-            "prediction": "phishing" if y == 1 else "safe",
-            "probability": prob
+        parsed = urlparse(url)
+        domain = parsed.netloc.lower()
+        
+        features = {
+            'domain_length': len(domain),
+            'num_dots': domain.count('.'),
+            'num_hyphens': domain.count('-'),
+            'has_https': 1 if parsed.scheme == 'https' else 0,
+            'path_length': len(parsed.path),
+            'query_length': len(parsed.query),
+            'has_at_symbol': 1 if '@' in url else 0,
+            'num_special_chars': len(re.findall(r'[~!@#$%^&*()_+={}\[\]:;<>?/\\|]', url))
         }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Prediction failed: {e}")
+        return features
+    except:
+        return {}
+
+def preprocess_url(url):
+    """معالجة محسنة للرابط مع الحفاظ على الهيكل"""
+    try:
+        # استخراج الدومين فقط للمعالجة الأساسية
+        parsed = urlparse(url)
+        domain = parsed.netloc.lower()
+        
+        # تنظيف الدومين
+        if domain.startswith('www.'):
+            domain = domain[4:]
+        
+        # استخدام الدومين المعالج مع بعض ميزات المسار
+        domain_tokens = tokenizer.tokenize(domain)
+        domain_stemmed = [stemmer.stem(word) for word in domain_tokens]
+        
+        # إضافة بعض ميزات المسار إذا كانت طويلة (مشبوهة)
+        path = parsed.path.lower()
+        if len(path) > 30:  # إذا كان المسار طويلاً
+            path_tokens = tokenizer.tokenize(path[:50])  # أول 50 حرف فقط
+            path_stemmed = [stemmer.stem(word) for word in path_tokens]
+            domain_stemmed.extend(path_stemmed)
+        
+        sent = ' '.join(domain_stemmed)
+        return sent
+    except:
+        # إذا فشل التحليل، استخدم المعالجة الأصلية
+        tokens = tokenizer.tokenize(url)
+        stemmed = [stemmer.stem(word) for word in tokens]
+        return ' '.join(stemmed)
+
+@app.post("/predict")
+def predict_phishing(data: URLInput):
+    """التوقع مع معالجة محسنة للدومين"""
+    
+    # استخراج الميزات الإضافية
+    features = extract_domain_features(data.url)
+    
+    # المعالجة المسبقة
+    processed = preprocess_url(data.url)
+    vectorized = cv.transform([processed])
+    
+    # التوقع
+    prediction = model.predict(vectorized)
+    
+    # حساب درجة الثقة إذا كان النموذج يدعم
+    confidence_score = 0.5
+    try:
+        if hasattr(model, 'predict_proba'):
+            proba = model.predict_proba(vectorized)[0]
+            confidence_score = max(proba)
+    except:
+        pass
+    
+    # تحديد مستوى الثقة
+    if confidence_score > 0.8:
+        confidence_level = "high"
+    elif confidence_score > 0.6:
+        confidence_level = "medium"
+    else:
+        confidence_level = "low"
+    
+    result = "phishing" if prediction[0] == 1 else "safe"
+    
+    return {
+        "url": data.url,
+        "prediction": result,
+        "confidence": confidence_level,
+        "confidence_score": round(confidence_score, 3),
+        "domain": urlparse(data.url).netloc if '://' in data.url else data.url
+    }
+
+# نقطة نهاية لمعاينة المعالجة
+@app.post("/debug-preprocess")
+def debug_preprocess(data: URLInput):
+    """لتصحيح عملية المعالجة المسبقة"""
+    processed = preprocess_url(data.url)
+    features = extract_domain_features(data.url)
+    
+    return {
+        "original_url": data.url,
+        "processed_text": processed,
+        "domain_features": features,
+        "domain": urlparse(data.url).netloc if '://' in data.url else data.url
+    }
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
