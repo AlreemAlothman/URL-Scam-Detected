@@ -84,3 +84,6 @@ def _predict(url: str):
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Prediction failed: {e}")
+
+
+
