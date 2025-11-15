@@ -9,7 +9,7 @@ app = FastAPI(title="URL Scam Detector", version="1.0.0")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # في الإنتاج حددي دوميناتك
+    allow_origins=["*"],  
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -84,3 +84,4 @@ def _predict(url: str):
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Prediction failed: {e}")
+
