@@ -3,7 +3,6 @@ from pydantic import BaseModel
 import joblib
 from urllib.parse import urlparse
 
-# التحميل
 model = joblib.load('phishing_model.pkl')
 cv = joblib.load('vectorizer.pkl')
 
@@ -12,7 +11,6 @@ app = FastAPI()
 class URLInput(BaseModel):
     url: str
 
-# القائمة البيضاء الموسعة
 TRUSTED_DOMAINS = {
     'whatsapp.com', 'facebook.com', 'google.com', 'youtube.com', 'instagram.com',
     'twitter.com', 'linkedin.com', 'microsoft.com', 'apple.com', 'amazon.com',
@@ -32,7 +30,6 @@ def is_trusted_domain(url):
     return domain in TRUSTED_DOMAINS
 
 def model_predict(url):
-    """التوقع باستخدام النموذج فقط"""
     from nltk.tokenize import RegexpTokenizer
     from nltk.stem.snowball import SnowballStemmer
     
@@ -59,7 +56,6 @@ def model_predict(url):
 def predict_phishing(data: URLInput):
     domain = extract_base_domain(data.url)
     
-    # التحقق من القائمة البيضاء أولاً
     if is_trusted_domain(data.url):
         return {
             "url": data.url,
@@ -70,7 +66,6 @@ def predict_phishing(data: URLInput):
             "reason": "الموقع موجود في قائمة المواقع العالمية الموثوقة"
         }
     
-    # استخدام النموذج للمواقع غير المعروفة
     model_result = model_predict(data.url)
     
     return {
@@ -82,7 +77,6 @@ def predict_phishing(data: URLInput):
         "reason": "تم التحليل بواسطة نموذج machine learning"
     }
 
-# endpoints للإدارة
 @app.post("/add-trusted-domain")
 def add_trusted_domain(domain: str):
     TRUSTED_DOMAINS.add(domain.lower())
@@ -91,4 +85,5 @@ def add_trusted_domain(domain: str):
 @app.get("/trusted-domains")
 def get_trusted_domains():
     return sorted(list(TRUSTED_DOMAINS))
+
 
